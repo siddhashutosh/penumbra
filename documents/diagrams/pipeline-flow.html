@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PENUMBRA — Forecast Pipeline (n8n-style flow)</title>
+<style>
+  :root {
+    --bg: #070a12;
+    --grid: rgba(190, 140, 70, 0.07);
+    --node-bg: #17110a;
+    --node-border: #3a2b16;
+    --node-border-hot: #ffb454;
+    --text: #f6e9d4;
+    --sub: #b0987a;
+    --faint: #6e5c42;
+    --amber: #ffb454;
+    --plasma: #ff7a45;
+    --teal: #4fd4c4;
+    --green: #6ee787;
+    --red: #ff6b6b;
+    --wire: #4a3720;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 620px at 72% -12%, rgba(224, 121, 26, 0.16), transparent 62%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #viewport { width: 100%; height: 100%; overflow: hidden; cursor: grab; }
+  #viewport.dragging { cursor: grabbing; }
+  #canvas {
+    position: relative; width: 1560px; height: 760px;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 24px 24px;
+    transform-origin: 0 0;
+  }
+  header {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+    display: flex; align-items: baseline; gap: 14px; padding: 14px 22px;
+    background: linear-gradient(rgba(7,10,18,0.95), rgba(7,10,18,0.55) 80%, transparent);
+    pointer-events: none;
+  }
+  header h1 { font-size: 15px; letter-spacing: 4px; font-weight: 700; }
+  header h1 span { color: var(--amber); }
+  header p { font-size: 12px; color: var(--sub); }
+  svg#wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .wire { fill: none; stroke: var(--wire); stroke-width: 2; }
+  .wire-flow { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 6 14; animation: flow 1.1s linear infinite; }
+  @keyframes flow { to { stroke-dashoffset: -20; } }
+  .node {
+    position: absolute; width: 224px; background: var(--node-bg);
+    border: 1px solid var(--node-border); border-radius: 10px;
+    padding: 12px 14px 10px; box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+    transition: border-color .2s, transform .2s, box-shadow .2s;
+  }
+  .node:hover { transform: translateY(-2px); border-color: var(--node-border-hot); box-shadow: 0 10px 30px rgba(255,180,84,.13); }
+  .node .head { display: flex; align-items: center; gap: 9px; }
+  .node .icon { width: 30px; height: 30px; border-radius: 8px; flex: 0 0 30px; display: grid; place-items: center; font-size: 15px; background: rgba(255, 180, 84, 0.13); }
+  .node .title { font-size: 13px; font-weight: 600; letter-spacing: .3px; }
+  .node .kind { font-size: 10px; color: var(--sub); text-transform: uppercase; letter-spacing: 1.2px; }
+  .node .desc { font-size: 11px; color: var(--sub); margin-top: 8px; line-height: 1.45; }
+  .node .meta { display: flex; justify-content: space-between; align-items: center; margin-top: 9px; padding-top: 8px; border-top: 1px solid rgba(58, 43, 22, 0.6); font-size: 10.5px; color: var(--sub); }
+  .node .status { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sub); }
+  .node[data-status="ok"] .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .node[data-status="running"] .dot { background: var(--amber); box-shadow: 0 0 8px var(--amber); animation: pulse 1s infinite; }
+  .node[data-status="degraded"] .dot { background: var(--plasma); box-shadow: 0 0 8px var(--plasma); }
+  .node[data-status="error"] .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .node.src { border-left: 3px solid var(--teal); }
+  .node.agent { border-left: 3px solid var(--amber); }
+  .node.out { border-left: 3px solid var(--green); }
+  .node.src .icon { background: rgba(79, 212, 196, 0.14); }
+  .node.out .icon { background: rgba(110, 231, 135, 0.13); }
+  .port { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--bg); border: 2px solid var(--wire); top: 50%; margin-top: -5px; }
+  .port.in { left: -6px; } .port.out { right: -6px; }
+  .legend {
+    position: fixed; bottom: 14px; left: 18px; z-index: 30; display: flex; gap: 16px;
+    font-size: 11px; color: var(--sub); background: rgba(18, 14, 8, 0.85);
+    border: 1px solid var(--node-border); padding: 8px 14px; border-radius: 8px; backdrop-filter: blur(4px);
+  }
+  .legend .dot { display: inline-block; vertical-align: middle; margin-right: 5px; }
+  .hint { position: fixed; bottom: 14px; right: 18px; z-index: 30; font-size: 11px; color: var(--sub); }
+</style>
+</head>
+<body>
+<header>
+  <h1>PENUMBRA<span> · FORECAST PIPELINE</span></h1>
+  <p>Probabilistic space-weather driver forecasting — PEN-DIA-001 · drag to pan, wheel to zoom</p>
+</header>
+
+<div id="viewport"><div id="canvas"><svg id="wires"></svg></div></div>
+
+<div class="legend">
+  <span><span class="dot" style="background:var(--green)"></span>ok</span>
+  <span><span class="dot" style="background:var(--amber)"></span>running</span>
+  <span><span class="dot" style="background:var(--plasma)"></span>degraded</span>
+  <span><span class="dot" style="background:var(--red)"></span>error</span>
+  <span><span class="dot" style="background:var(--sub)"></span>idle</span>
+</div>
+<div class="hint">Live status via postMessage from PENUMBRA UI · standalone = demo animation</div>
+
+<script>
+(function () {
+  const NODES = [
+    { id: "swpc_f107", cls: "src", x: 40, y: 120, icon: "☀️", kind: "data source",
+      title: "NOAA F10.7", desc: "Daily solar radio flux + long history. 3 h TTL.", meta: "f107_cm_flux.json" },
+    { id: "swpc_kp", cls: "src", x: 40, y: 320, icon: "🧲", kind: "data source",
+      title: "NOAA Kp", desc: "3-hourly planetary K-index → daily max / Ap.", meta: "planetary_k_index" },
+    { id: "swpc_45", cls: "src", x: 40, y: 520, icon: "📄", kind: "data source",
+      title: "NOAA 45-day", desc: "Official F10.7/Ap point forecast — skill baseline.", meta: "45-day-forecast.json" },
+    { id: "sync", cls: "agent", x: 330, y: 320, icon: "🔄", kind: "agent 01",
+      title: "SWPC Sync", desc: "Fetch → cache. Last-known-good fallback.", meta: "every 3 h" },
+    { id: "history", cls: "agent", x: 610, y: 320, icon: "📐", kind: "agent 02",
+      title: "History Builder", desc: "Align to daily grid, Kp→Ap, gap-fill.", meta: "daily series" },
+    { id: "backtest", cls: "agent", x: 890, y: 180, icon: "🎯", kind: "agent 03",
+      title: "Backtest Engine", desc: "Walk-forward, leakage-free. Error quantiles per lead.", meta: "no future leakage" },
+    { id: "forecast", cls: "agent", x: 890, y: 460, icon: "🌗", kind: "agent 04",
+      title: "Forecast Engine", desc: "F10.7 point + p05–p95 bands · Kp storm probabilities.", meta: "45-day horizon" },
+    { id: "calib", cls: "agent", x: 1170, y: 320, icon: "⚖️", kind: "agent 05",
+      title: "Calibration Auditor", desc: "Coverage · pinball · reliability · skill vs NOAA.", meta: "credibility artifact" },
+    { id: "publish", cls: "out", x: 1170, y: 100, icon: "📡", kind: "consumer",
+      title: "REST / OpenAPI", desc: "Typed JSON forecasts + calibration. /docs.", meta: "/api/v1" },
+    { id: "ui", cls: "out", x: 1170, y: 560, icon: "📊", kind: "consumer",
+      title: "Forecast Dashboard", desc: "Fan chart, Kp strip, drag panel, this diagram — live.", meta: "React + Canvas" },
+  ];
+  const EDGES = [
+    ["swpc_f107","sync","teal"], ["swpc_kp","sync","teal"], ["swpc_45","sync","teal"],
+    ["sync","history","amber"], ["history","backtest","amber"], ["history","forecast","amber"],
+    ["backtest","forecast","amber"], ["backtest","calib","amber"], ["forecast","calib","amber"],
+    ["calib","publish","green"], ["calib","ui","green"], ["forecast","ui","green"],
+  ];
+  const COLOR = { teal: "#4fd4c4", amber: "#ffb454", green: "#6ee787" };
+  const NODE_W = 224;
+  const canvas = document.getElementById("canvas");
+  const svg = document.getElementById("wires");
+
+  for (const n of NODES) {
+    const el = document.createElement("div");
+    el.className = "node " + n.cls; el.id = "node-" + n.id;
+    el.style.left = n.x + "px"; el.style.top = n.y + "px"; el.dataset.status = "idle";
+    el.innerHTML =
+      '<div class="head"><div class="icon">' + n.icon + '</div><div>' +
+      '<div class="kind">' + n.kind + '</div><div class="title">' + n.title + '</div></div></div>' +
+      '<div class="desc">' + n.desc + '</div>' +
+      '<div class="meta"><span>' + n.meta + '</span>' +
+      '<span class="status"><span class="dot"></span><span class="stxt">idle</span></span></div>' +
+      '<span class="port in"></span><span class="port out"></span>';
+    canvas.appendChild(el);
+  }
+  function center(n, side) {
+    const el = document.getElementById("node-" + n.id); const h = el.offsetHeight;
+    return { x: n.x + (side === "out" ? NODE_W : 0), y: n.y + h / 2 };
+  }
+  function draw() {
+    svg.innerHTML = "";
+    const byId = Object.fromEntries(NODES.map(n => [n.id, n]));
+    for (const [a, b, c] of EDGES) {
+      const p1 = center(byId[a], "out"), p2 = center(byId[b], "in");
+      const dx = Math.max(60, (p2.x - p1.x) / 2);
+      const d = `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${p2.x - dx} ${p2.y}, ${p2.x} ${p2.y}`;
+      const base = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      base.setAttribute("d", d); base.setAttribute("class", "wire"); svg.appendChild(base);
+      const flow = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      flow.setAttribute("d", d); flow.setAttribute("class", "wire-flow");
+      flow.setAttribute("stroke", COLOR[c]); flow.setAttribute("opacity", "0.85"); svg.appendChild(flow);
+    }
+  }
+  draw();
+  function setStatus(id, status, text) {
+    const el = document.getElementById("node-" + id); if (!el) return;
+    el.dataset.status = status; el.querySelector(".stxt").textContent = text || status;
+  }
+  let live = false;
+  window.addEventListener("message", (ev) => {
+    const msg = ev.data;
+    if (!msg || msg.type !== "penumbra:pipeline" || !Array.isArray(msg.agents)) return;
+    live = true;
+    for (const a of msg.agents) setStatus(a.id, a.status, a.detail);
+  });
+  const SEQ = ["swpc_f107","swpc_kp","swpc_45","sync","history","backtest","forecast","calib","publish","ui"];
+  let i = 0;
+  setInterval(() => {
+    if (live) return;
+    const id = SEQ[i % SEQ.length];
+    setStatus(id, "running", "running");
+    setTimeout(() => { if (!live) setStatus(id, "ok", "ok"); }, 900);
+    i++;
+  }, 700);
+  const vp = document.getElementById("viewport");
+  let scale = 1, ox = 0, oy = 0, drag = null;
+  function apply() { canvas.style.transform = `translate(${ox}px, ${oy}px) scale(${scale})`; }
+  function fit() {
+    scale = Math.min(window.innerWidth / 1600, window.innerHeight / 800, 1.15);
+    ox = (window.innerWidth - 1560 * scale) / 2;
+    oy = Math.max(30, (window.innerHeight - 760 * scale) / 2); apply();
+  }
+  vp.addEventListener("mousedown", e => { drag = { x: e.clientX - ox, y: e.clientY - oy }; vp.classList.add("dragging"); });
+  window.addEventListener("mousemove", e => { if (drag) { ox = e.clientX - drag.x; oy = e.clientY - drag.y; apply(); } });
+  window.addEventListener("mouseup", () => { drag = null; vp.classList.remove("dragging"); });
+  vp.addEventListener("wheel", e => {
+    e.preventDefault(); const k = e.deltaY < 0 ? 1.1 : 0.9;
+    scale = Math.min(2.2, Math.max(0.4, scale * k)); apply();
+  }, { passive: false });
+  window.addEventListener("resize", fit); fit();
+})();
+</script>
+</body>
+</html>
