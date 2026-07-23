@@ -1,3 +1,4 @@
+# GENERATED from backend/app/logic — edit there, then run packages/sync.py
 """F10.7 probabilistic forecast (FR-F107): persistence + mean-reversion point
 model, and quantile bands from out-of-sample error distributions.
 
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from app.logic.series import DailySeries, trailing_mean
+from penumbra_toolkit.series import DailySeries, trailing_mean
 
 # Reversion time-constant (days): how quickly persistence gives way to the
 # climatological target as lead time grows.

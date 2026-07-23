@@ -44,6 +44,24 @@ positions that answer depends on?"* Together they form an **open orbital-risk st
 - **Calibration audit** — the credibility artifact: reliability/coverage (does the 90% band contain
   truth 90% of the time?), pinball loss, and skill score **against NOAA's own 45-day forecast**.
 
+## Use the math without the app
+
+The forecasting core ships as a standalone package (no FastAPI, no UI):
+
+```bash
+pip install penumbra-toolkit   # F10.7/Kp forecasts · calibration backtest · drag translation
+```
+
+```python
+from penumbra_toolkit import DailySeries, walk_forward_errors, forecast, coverage
+bt = walk_forward_errors(history, lead_days=45, min_train=400)   # leakage-free
+fc = forecast(history, 45, bt.error_quantiles)                   # calibrated bands
+print(fc.point[6], fc.bands[5][6], fc.bands[95][6], coverage(bt)[0])
+```
+
+See [`packages/penumbra-toolkit/`](packages/penumbra-toolkit/) — generated from
+`backend/app/logic/` (the source of truth) and kept in sync via `packages/sync.py`.
+
 ## Data sources & attribution
 
 - **NOAA SWPC** (`services.swpc.noaa.gov`) — F10.7, planetary Kp, and the official 45-day forecast.
