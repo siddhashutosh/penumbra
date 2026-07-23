@@ -2,6 +2,8 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776ab.svg)](backend/requirements.txt)
+[![PyPI](https://img.shields.io/pypi/v/penumbra-toolkit.svg)](https://pypi.org/project/penumbra-toolkit/)
+[![Tests](https://img.shields.io/badge/tests-35%20passing-3ddc84.svg)](backend/tests)
 
 **Probabilistic Space-Weather Driver Forecasting** — an open-source pipeline that forecasts
 the two solar/geomagnetic drivers that govern satellite orbital drag (**F10.7** solar radio flux
