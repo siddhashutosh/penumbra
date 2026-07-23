@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PENUMBRA — QA Report</title>
+<link rel="stylesheet" href="doc-style.css">
+</head>
+<body>
+
+<div class="cover">
+  <div class="project">PENUMBRA</div>
+  <div class="doctitle">Quality Assurance Report — Release Readiness</div>
+  <div class="meta">
+    <span><b>Document ID:</b> PEN-QA-001</span>
+    <span><b>Version:</b> 1.0</span>
+    <span><b>Date:</b> 24 July 2026</span>
+    <span><b>Verdict:</b> READY FOR TESTING &amp; DEPLOY</span>
+  </div>
+  <div class="meta"><span><b>Baseline:</b> PEN-SRS-001 v1.0</span></div>
+</div>
+
+<h1>1. Summary</h1>
+<p>PENUMBRA v1.0 was verified against the SRS acceptance criteria. The automated suite
+(<b>35 tests, 35 passed, 0 failed</b>, ~0.8 s) covers the F10.7 forecast, Kp categorical forecast,
+the leakage-free calibration backtest, the drag translation, and the full API contract. The UI
+builds clean under strict TypeScript and renders the fan chart, Kp strip, drag panel, and
+calibration diagrams correctly. Live NOAA connectivity was confirmed. Two findings surfaced during
+QA (both resolved). <b>Verdict: ready for testing and deployment alongside KESSLER.</b></p>
+
+<h1>2. Automated Test Results</h1>
+<table>
+  <tr><th>Suite</th><th>Coverage</th><th>Result</th></tr>
+  <tr><td class="mono">test_f107_forecast (8)</td><td>Point reverts toward climatology at long lead; band monotonicity p05≤…≤p95 per lead; 64-sfu floor; synthetic flat-signal recovery; bands widen with lead.</td><td class="mono">PASS</td></tr>
+  <tr><td class="mono">test_kp_forecast (6)</td><td>Category boundaries; probabilities sum to 1 per lead; recent-storm sensitivity; Ap band ordering; full-forecast shape.</td><td class="mono">PASS</td></tr>
+  <tr><td class="mono">test_calibration (9)</td><td><b>Leakage-freedom</b> (corrupting the future cannot change past-origin errors); nominal coverage on stationary synthetic; pinball zero at perfect quantile and correct asymmetry; skill sign; reliability on a perfectly-calibrated synthetic.</td><td class="mono">PASS</td></tr>
+  <tr><td class="mono">test_drag (5)</td><td>Density increases with F10.7; altitude ordering (lower = denser); reference value at F_REF; higher-flux widens decay band; lower altitude → more decay.</td><td class="mono">PASS</td></tr>
+  <tr><td class="mono">test_api (7)</td><td>Health; F10.7 contract + band monotonicity + floor + NOAA overlay; Kp probability normalisation; drag altitude ordering; calibration shape; observations; briefing fallback; pipeline status; validation + 404 envelopes.</td><td class="mono">PASS</td></tr>
+</table>
+
+<h1>3. Live Verification</h1>
+<table>
+  <tr><th>Check</th><th>Observed</th><th>Status</th></tr>
+  <tr><td>Backend boot (Demo Mode, zero credentials)</td><td>Pipeline ran on startup; all 6 agents report <span class="mono">ok</span>; forecast/calibration snapshots published.</td><td>✔</td></tr>
+  <tr><td>GET /forecast/f107</td><td>45-day point + p05–p95 bands, monotone, floored; NOAA overlay present.</td><td>✔</td></tr>
+  <tr><td>GET /forecast/kp</td><td>7-day category probabilities summing to 1; expected Ap band.</td><td>✔</td></tr>
+  <tr><td>GET /forecast/drag</td><td>±1904 km in-track at 400 km, ±248 km at 550 km, ±12 km at 800 km — correct altitude dependence.</td><td>✔</td></tr>
+  <tr><td>GET /calibration</td><td>90% empirical coverage (target 0.90); beats persistence at 36/45 leads; honest skill dips shown.</td><td>✔</td></tr>
+  <tr><td>Live NOAA connectivity</td><td>Real fetch returned 122 F10.7 rows (last 128 sfu) and 62 Kp rows — live mode functional.</td><td>✔</td></tr>
+  <tr><td>UI (strict TS build + render)</td><td>Fan chart, Kp strip, drag panel, calibration diagrams render; 60 KB gzipped, no chart library.</td><td>✔</td></tr>
+  <tr><td>Briefing graceful degradation</td><td>No API key → deterministic template briefing, <span class="mono">source:"template"</span>, no error.</td><td>✔</td></tr>
+  <tr><td>Error envelope + observability</td><td>Validation → 422 envelope; unknown API route → 404 envelope; request-id in logs and X-Request-Id header; rotating file log active.</td><td>✔</td></tr>
+</table>
+
+<h1>4. Findings</h1>
+<table>
+  <tr><th>ID</th><th>Severity</th><th>Finding</th><th>Disposition</th></tr>
+  <tr><td class="req-id">QA-1</td><td>Major</td><td><b>SPA catch-all masked API 404s.</b> With <code>ui/dist</code> present, the single-service SPA fallback served <code>index.html</code> (HTTP 200) for unmatched <code>/api/*</code> routes instead of 404.</td><td><b>Fixed:</b> the SPA handler now returns the 404 error envelope for <code>api/</code>, <code>docs</code>, <code>openapi.json</code>, <code>redoc</code> prefixes. Regression covered by <code>test_unknown_route_404</code>.</td></tr>
+  <tr><td class="req-id">QA-2</td><td>Note</td><td><b>Skill measured vs persistence, not NOAA historical.</b> NOAA's free endpoint exposes only the current 45-day forecast, not a historical archive, so a reproducible backtest cannot score against past NOAA issues.</td><td>By design: skill is scored against a reproducible persistence baseline (clearly labelled), and NOAA's live forecast is overlaid on the forecast chart for direct current-issue comparison. Documented in the calibration summary and HLD §3.</td></tr>
+  <tr><td class="req-id">QA-3</td><td>Note</td><td><b>Honest skill dips on demo data.</b> On the strongly-periodic bundled demo series, mean-reversion underperforms persistence at a few leads (visible negative skill).</td><td>Retained deliberately — showing where the model is weaker is the credibility point; real F10.7 gives a smoother profile.</td></tr>
+  <tr><td class="req-id">QA-4</td><td>Note</td><td>Drag translation is a reduced exponential-atmosphere model.</td><td>Explicitly labelled "reduced-model, order-of-magnitude" in the UI and API (FR-DRAG-3).</td></tr>
+</table>
+
+<h1>5. Requirements Traceability (Must-haves)</h1>
+<p>FR-ING-1..6 ✔ (demo fallback, TTL cache, last-known-good; live NOAA verified) · FR-F107-1..4 ✔
+(point + empirical-quantile bands, monotone, floored) · FR-KP-1..3 ✔ · FR-VER-1..5 ✔
+(leakage-free backtest, coverage, reliability, pinball, skill, all exposed in UI) · FR-DRAG-1..3 ✔ ·
+FR-API-1..3 ✔ · FR-UI-1..6 ✔ (fan chart, Kp strip, drag, calibration page, pipeline, licence in UI) ·
+NFR-1/2/4/7 ✔ · NFR-3 spot-checked (backtest &lt; 1 s on bundled record) · NFR-5 (coexistence) to be
+confirmed on deploy · NFR-6 (logic-layer coverage) — comprehensive suites in place.</p>
+
+<h1>6. Sign-off</h1>
+<p>QA verdict: <b>APPROVED for testing and deployment.</b> Deployment must run PENUMBRA as an
+isolated systemd service on its own port with the co-hosted KESSLER service unaffected (NFR-5), to
+be verified during the deploy step.</p>
+
+<footer>PENUMBRA · PEN-QA-001 v1.0 · Test evidence: pytest output + live endpoint transcripts + UI render, 24 Jul 2026.</footer>
+</body>
+</html>

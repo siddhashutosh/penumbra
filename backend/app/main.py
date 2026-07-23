@@ -111,6 +111,9 @@ if (_UI_DIST / "index.html").exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
+        # unmatched API/docs paths must 404, not fall through to the SPA
+        if full_path.startswith(("api/", "docs", "openapi.json", "redoc")):
+            return _envelope("NOT_FOUND", f"No route /{full_path}", None, 404)
         candidate = (_UI_DIST / full_path).resolve()
         if (full_path and candidate.is_file()
                 and candidate.is_relative_to(_UI_DIST.resolve())):
