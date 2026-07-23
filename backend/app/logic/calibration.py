@@ -25,6 +25,7 @@ class BacktestResult:
     errors: dict[int, np.ndarray]           # lead -> signed (obs - pred) OOS
     error_quantiles: dict[int, dict[int, float]]
     penumbra_rmse: dict[int, float]         # lead -> RMSE
+    reference_rmse: dict[int, float]        # lead -> persistence-baseline RMSE
 
 
 def _slice(history: DailySeries, upto: int) -> DailySeries:
@@ -49,24 +50,29 @@ def walk_forward_errors(
             f"history too short for backtest: need {min_train + lead_days}, have {n}"
         )
     errors: dict[int, list[float]] = {lead: [] for lead in range(1, lead_days + 1)}
+    ref_sq: dict[int, list[float]] = {lead: [] for lead in range(1, lead_days + 1)}
     for t in range(min_train, n - 1):
         if (t - min_train) % step != 0:
             continue
         train = _slice(history, t)
         max_lead = min(lead_days, n - 1 - t)
         pred = point_forecast(train, max_lead)
+        persistence = float(train.values[-1])   # naive reference: last observed
         for lead in range(1, max_lead + 1):
             obs = float(history.values[t + lead])
             errors[lead].append(obs - float(pred[lead - 1]))
+            ref_sq[lead].append((obs - persistence) ** 2)
 
     err_arr = {lead: np.array(v) for lead, v in errors.items() if v}
     eq: dict[int, dict[int, float]] = {}
     rmse: dict[int, float] = {}
+    ref_rmse: dict[int, float] = {}
     for lead, arr in err_arr.items():
         eq[lead] = {q: float(np.percentile(arr, q)) for q in _QUANTILES}
         rmse[lead] = float(np.sqrt(np.mean(arr ** 2)))
-    return BacktestResult(lead_days=lead_days, errors=err_arr,
-                          error_quantiles=eq, penumbra_rmse=rmse)
+        ref_rmse[lead] = float(np.sqrt(np.mean(np.array(ref_sq[lead]))))
+    return BacktestResult(lead_days=lead_days, errors=err_arr, error_quantiles=eq,
+                          penumbra_rmse=rmse, reference_rmse=ref_rmse)
 
 
 def coverage(backtest: BacktestResult) -> list[dict]:
@@ -114,20 +120,26 @@ def pinball_by_lead(backtest: BacktestResult) -> list[float]:
 
 
 def skill_vs_reference(
-    backtest: BacktestResult, noaa_rmse: dict[int, float] | None
+    backtest: BacktestResult, reference_rmse: dict[int, float] | None = None
 ) -> list[dict]:
-    """Skill = 1 - RMSE_penumbra / RMSE_noaa, per lead (positive = better)."""
+    """Skill = 1 - RMSE_penumbra / RMSE_reference, per lead (positive = better).
+
+    Default reference is the persistence baseline computed in the same
+    walk-forward backtest — reproducible and leakage-free. NOAA's live forecast
+    is overlaid separately on the forecast chart for direct visual comparison.
+    """
+    ref = reference_rmse if reference_rmse is not None else backtest.reference_rmse
     out = []
     for lead in sorted(backtest.penumbra_rmse):
         pen = backtest.penumbra_rmse[lead]
-        nref = (noaa_rmse or {}).get(lead)
+        nref = (ref or {}).get(lead)
         skill = None
         if nref and nref > 0:
             skill = round(1.0 - pen / nref, 3)
         out.append({
             "lead": lead,
             "penumbra_rmse": round(pen, 2),
-            "noaa_rmse": round(nref, 2) if nref else None,
+            "baseline_rmse": round(nref, 2) if nref else None,
             "skill": skill,
         })
     return out

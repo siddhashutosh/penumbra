@@ -69,11 +69,19 @@ class TestSkill:
         bad = cal.skill_vs_reference(bt, noaa_better)
         assert all(row["skill"] < 0 for row in bad)
 
-    def test_skill_none_without_reference(self):
+    def test_skill_none_with_empty_reference(self):
+        # an empty reference dict yields no baseline -> skill None
         s = synthetic_f107(n=700, noise=6, seed=15)
         bt = cal.walk_forward_errors(s, lead_days=5, min_train=350, step=5)
-        rows = cal.skill_vs_reference(bt, None)
+        rows = cal.skill_vs_reference(bt, {})
         assert all(row["skill"] is None for row in rows)
+
+    def test_skill_default_uses_persistence_baseline(self):
+        # None -> falls back to the built-in persistence reference (skills present)
+        s = synthetic_f107(n=700, noise=6, seed=16)
+        bt = cal.walk_forward_errors(s, lead_days=5, min_train=350, step=5)
+        rows = cal.skill_vs_reference(bt, None)
+        assert all(row["skill"] is not None for row in rows)
 
 
 class TestReliability:

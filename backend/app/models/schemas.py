@@ -83,7 +83,7 @@ class CoveragePoint(BaseModel):
 class SkillPoint(BaseModel):
     lead: int
     penumbra_rmse: float
-    noaa_rmse: float | None
+    baseline_rmse: float | None
     skill: float | None
 
 
