@@ -11,6 +11,15 @@ and translates that uncertainty into orbital-drag and orbit-decay risk.
 > Named for the *penumbra* — the fuzzy partial shadow of a sunspot, and the band of uncertainty
 > that surrounds every honest forecast. Making that band visible is the whole point.
 
+**🌗 Live demo: [http://13.127.244.0:8080](http://13.127.244.0:8080)** — F10.7 fan chart, Kp storm
+probabilities, orbital-drag impact, and the calibration report
+([API docs](http://13.127.244.0:8080/docs) · [live pipeline](http://13.127.244.0:8080/pipeline)).
+
+![PENUMBRA dashboard](docs-assets/dashboard.png)
+*The F10.7 forecast with nested 50%/90% uncertainty bands and NOAA's forecast overlaid; per-day Kp
+storm probabilities; and the headline — how the F10.7 uncertainty becomes hundreds-to-thousands of
+km of in-track position uncertainty for low-altitude satellites.*
+
 ## Why this exists
 
 Atmospheric drag is the single largest source of orbit-prediction error in low Earth orbit, and
