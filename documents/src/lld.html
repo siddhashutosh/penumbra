@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PENUMBRA — Low-Level Design</title>
+<link rel="stylesheet" href="doc-style.css">
+</head>
+<body>
+
+<div class="cover">
+  <div class="project">PENUMBRA</div>
+  <div class="doctitle">Low-Level Design (LLD)</div>
+  <div class="meta">
+    <span><b>Document ID:</b> PEN-LLD-001</span>
+    <span><b>Version:</b> 1.0</span>
+    <span><b>Date:</b> 23 July 2026</span>
+    <span><b>Traces to:</b> PEN-HLD-001, PEN-SRS-001</span>
+  </div>
+</div>
+
+<h1>1. Repository Layout</h1>
+<pre>
+penumbra/
+├── documents/            SRS/HLD/LLD/QA (src html + pdf), diagrams/, pitch/
+├── backend/
+│   ├── requirements.txt  fastapi, uvicorn, pydantic-settings, numpy, httpx, python-dateutil, pytest
+│   ├── logs/             penumbra.log (rotating, git-ignored)
+│   └── app/
+│       ├── main.py       app factory, middleware, handlers, startup pipeline, SPA serving
+│       ├── core/         config.py · logging_config.py · exceptions.py
+│       ├── models/       schemas.py (Pydantic v2 DTOs)
+│       ├── logic/        series.py · f107_forecast.py · kp_forecast.py
+│       │                 · calibration.py · drag.py            [pure, no I/O]
+│       ├── service/      swpc_client.py · cache_service.py · forecast_service.py
+│       │                 · pipeline_service.py · briefing_service.py
+│       ├── api/          routes.py
+│       └── data/         sample_f107.json · sample_kp.json · sample_noaa45.json · cache.db (runtime)
+├── backend/tests/        test_f107_forecast.py · test_kp_forecast.py · test_calibration.py
+│                         · test_drag.py · test_api.py
+└── ui/                   Vite + React + TS (src/api, src/components, src/pages, src/styles)
+</pre>
+
+<h1>2. Core (app/core)</h1>
+<h2>2.1 config.py</h2>
+<pre>
+class Settings(BaseSettings):            # env prefix PENUMBRA_, .env supported
+    app_name = "PENUMBRA"; version = "1.0.0"
+    demo_mode: bool | None = None        # None -> auto: demo unless PENUMBRA_LIVE=1
+    anthropic_api_key: str | None = None
+    data_dir / log_dir: Path
+    obs_ttl_seconds = 10800              # 3 h  (CON-4)
+    forecast_ttl_seconds = 21600         # 6 h
+    max_lead_days = 45
+    kp_max_lead_days = 7
+    f107_floor_sfu = 64.0                # quiet-Sun minimum (FR-F107-3)
+    backtest_min_history_days = 400
+    pipeline_refresh_seconds = 10800
+</pre>
+<h2>2.2 exceptions.py</h2>
+<table>
+  <tr><th>Class</th><th>code</th><th>HTTP</th></tr>
+  <tr><td class="mono">PenumbraError (base)</td><td>PENUMBRA_ERROR</td><td>500</td></tr>
+  <tr><td class="mono">ConfigError</td><td>CONFIG_ERROR</td><td>500</td></tr>
+  <tr><td class="mono">DataSourceError</td><td>DATA_SOURCE_ERROR</td><td>502</td></tr>
+  <tr><td class="mono">InsufficientDataError</td><td>INSUFFICIENT_DATA</td><td>422</td></tr>
+  <tr><td class="mono">ForecastError</td><td>FORECAST_ERROR</td><td>500</td></tr>
+  <tr><td class="mono">NotFoundError</td><td>NOT_FOUND</td><td>404</td></tr>
+  <tr><td class="mono">ValidationFailure</td><td>VALIDATION_ERROR</td><td>422</td></tr>
+</table>
+<p>Global FastAPI handlers convert <code>PenumbraError</code> → <code>{"error":{code,message,detail,request_id}}</code>;
+a catch-all maps other exceptions to 500 <code>INTERNAL_ERROR</code> after logging.</p>
+
+<h1>3. Logic Layer (app/logic) — algorithms</h1>
+
+<h2>3.1 series.py</h2>
+<pre>
+@dataclass DailySeries: dates: list[date], values: np.ndarray   # aligned, gap-filled
+load_daily_f107(records) -> DailySeries         # from SWPC f107_cm_flux json
+kp_to_daily(records) -> (DailySeries max_kp, DailySeries ap)    # 3-hourly -> daily
+    # Ap from Kp via the standard ap-from-Kp lookup (Kp thirds -> ap: 0..400)
+align(*series) -> common daily grid; forward/interp gap-fill &lt;= 3-day gaps
+trailing_mean(values, window) -> np.ndarray     # 27-day rotation mean etc.
+</pre>
+
+<h2>3.2 f107_forecast.py</h2>
+<pre>
+point_forecast(history: DailySeries, lead_days: int) -> np.ndarray
+    # x0 = last observed; m27 = trailing 27-day mean; mcyc = trailing 90-day mean
+    # reversion weight w(L) = 1 - exp(-L / TAU), TAU ~ 10 days
+    # target(L) = blend(m27, mcyc, by L)         # short lead -> 27d, long -> cycle
+    # f(L) = x0 + (target(L) - x0) * w(L)         # persistence -> reversion
+    # floored at settings.f107_floor_sfu
+
+quantile_bands(point: np.ndarray, err_quantiles: dict[int, dict[float,float]])
+    -> dict[str, np.ndarray]                      # p05,p25,p50,p75,p95 per lead
+    # band[q][L] = point[L] + err_quantiles[L][q]; enforce monotone; floor
+</pre>
+
+<h2>3.3 kp_forecast.py</h2>
+<pre>
+CATEGORIES = ["quiet","unsettled","active","storm"]   # Kp &lt;3, 3-4, 4-5, &gt;=5
+category_probabilities(daily_kp: DailySeries, lead_days: int, halflife=180)
+    -> list[dict[str,float]]
+    # current state s0 = category(last max_kp)
+    # from history build recency-weighted transition counts state->category@lead
+    # P(cat | s0, L) = weighted_count / total ; Laplace-smoothed; sums to 1
+expected_ap(daily_ap, lead_days) -> (point, lo, hi)   # persistence + climatology band
+</pre>
+
+<h2>3.4 calibration.py — verification core</h2>
+<pre>
+walk_forward_errors(history, lead_days, min_train, step)
+    -> dict[int, np.ndarray]                      # signed errors per lead (OOS)
+    # for origin t in [min_train .. N-lead) step k:
+    #     train = history[:t+1]                    # STRICT — no future (CON-2)
+    #     pred  = point_forecast(train, lead)
+    #     err[L].append(history[t+L] - pred[L-1])
+    # returns per-lead error arrays -> quantiles feed f107 bands
+
+error_quantiles(errors, qs=(5,25,50,75,95)) -> dict[int, dict[float,float]]
+coverage(history, bands_by_origin) -> dict[int, {p50_50, p90}]   # empirical coverage
+pinball_loss(y, q_pred, q) -> float                               # proper score
+skill_vs_reference(pen_rmse, noaa_rmse) -> 1 - pen/noaa           # per lead
+reliability(pred_probs, outcomes, bins=10) -> [(pred, obs, n)]    # Kp reliability
+</pre>
+
+<h2>3.5 drag.py</h2>
+<pre>
+density_at(alt_km, f107) -> rho                   # reduced model:
+    # rho(h,F) = rho0(h) * exp((F - F_ref)/F_scale)   # F10.7-scaled exponential atm.
+    # rho0(h): tabulated reference density; F_ref=150, F_scale documented
+density_band(alt_km, f107_bands) -> {p05,p50,p95}
+decay_uncertainty(alt_km, f107_bands, bstar_like, days)
+    -> along-track_km {p05,p50,p95}               # da/dt ~ -k*rho*v ; integrate band
+    # labelled reduced-model, order-of-magnitude (FR-DRAG-3)
+</pre>
+
+<h1>4. Data Design — SQLite DDL</h1>
+<pre>
+CREATE TABLE IF NOT EXISTS kv_cache (
+  key TEXT PRIMARY KEY, payload TEXT NOT NULL,
+  fetched_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS forecast_snapshots (
+  id TEXT PRIMARY KEY, issued_at TEXT NOT NULL, document TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL,
+  started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+  items INTEGER DEFAULT 0, error TEXT);
+</pre>
+
+<h1>5. API Contract (app/api/routes.py)</h1>
+<table>
+  <tr><th>Method &amp; Path</th><th>Query</th><th>200 response (summary)</th></tr>
+  <tr><td class="mono">GET /api/v1/health</td><td>—</td><td>{status, version, data_mode, uptime_s}</td></tr>
+  <tr><td class="mono">GET /api/v1/forecast/f107</td><td>lead≤45</td><td>{issued_at, lead_days, point[], bands{p05,p25,p50,p75,p95}[], noaa_point[], history[], data_mode}</td></tr>
+  <tr><td class="mono">GET /api/v1/forecast/kp</td><td>lead≤7</td><td>{issued_at, days:[{lead, date, probs{quiet,unsettled,active,storm}, expected_ap{p05,p50,p95}}]}</td></tr>
+  <tr><td class="mono">GET /api/v1/forecast/drag</td><td>alt_km</td><td>{altitudes:[{alt_km, density{p05,p50,p95}, decay_along_track_km{p05,p50,p95}}], note}</td></tr>
+  <tr><td class="mono">GET /api/v1/calibration</td><td>—</td><td>{coverage_by_lead[], pinball_by_lead[], skill_vs_noaa[], kp_reliability[], summary}</td></tr>
+  <tr><td class="mono">GET /api/v1/observations/f107</td><td>days≤3650</td><td>{dates[], values[], unit:"sfu"}</td></tr>
+  <tr><td class="mono">GET /api/v1/briefing</td><td>—</td><td>{briefing, source:"ai"|"template"}</td></tr>
+  <tr><td class="mono">GET /api/v1/pipeline/status</td><td>—</td><td>{data_mode, agents:[{id,name,status,last_run,duration_ms,items,error}]}</td></tr>
+</table>
+<p>422 validation errors are reshaped into the envelope by an override of FastAPI's
+<code>RequestValidationError</code> handler; every response carries <code>X-Request-Id</code>.</p>
+
+<h1>6. Service Layer Detail</h1>
+<h2>6.1 swpc_client.py</h2>
+<pre>
+BASE = "https://services.swpc.noaa.gov"
+fetch_f107()        -> json    /json/f107_cm_flux.json
+fetch_kp()          -> json    /products/noaa-planetary-k-index.json
+fetch_noaa45()      -> json    /json/45-day-forecast.json
+fetch_history()     -> json    /json/solar-cycle/observed-solar-cycle-indices.json
+# httpx, timeout 30 s, 2 retries exp backoff; failures -> DataSourceError
+</pre>
+<h2>6.2 forecast_service.py — pipeline (sequence)</h2>
+<pre>
+refresh():                                        # startup + scheduled
+  1 pipeline.stage("swpc_sync")     -> cache.get_or_fetch(each source, loader|demo)
+  2 pipeline.stage("history")       -> series.load + kp_to_daily + align + gapfill
+  3 pipeline.stage("backtest")      -> walk_forward_errors + error_quantiles + Kp stats
+  4 pipeline.stage("forecast")      -> f107 point+bands, kp categories, expected Ap
+  5 pipeline.stage("calibration")   -> coverage, pinball, skill vs NOAA, reliability
+  6 pipeline.stage("publish")       -> persist snapshot; expose read-model
+  each stage: try/except -> record status/items/error; degrade to last-known-good;
+  the pipeline never aborts the app (FR-ING-6).
+</pre>
+<h2>6.3 briefing_service.py</h2>
+<p>If <code>anthropic_api_key</code> set: Claude Messages API (<code>claude-opus-4-8</code>,
+<code>thinking:{type:"adaptive"}</code>, max_tokens 400, 10 s timeout) summarising the current
+forecast + calibration into an operator note; on any failure log WARN and return a deterministic
+template. Never raises to caller.</p>
+
+<h1>7. UI Design (ui/)</h1>
+<table>
+  <tr><th>Module</th><th>Detail</th></tr>
+  <tr><td class="mono">src/api/client.ts</td><td>fetch wrapper: JSON, error-envelope unwrap → typed <code>ApiError</code>; single retry on 5xx.</td></tr>
+  <tr><td class="mono">components/FanChart.tsx</td><td>Canvas: observed history line, point forecast, nested p25–p75 &amp; p05–p95 fills, NOAA overlay dashed; hover readout with tabular-nums.</td></tr>
+  <tr><td class="mono">components/KpStrip.tsx</td><td>Per-day stacked category bars (quiet→storm), storm probability emphasised.</td></tr>
+  <tr><td class="mono">components/DragPanel.tsx</td><td>Density &amp; along-track decay uncertainty at reference altitudes; reduced-model caveat.</td></tr>
+  <tr><td class="mono">pages/CalibrationPage.tsx</td><td>Coverage-by-lead bars vs target line, reliability diagram (Canvas), skill-vs-NOAA curve.</td></tr>
+  <tr><td class="mono">pages/PipelinePage.tsx</td><td>Embeds <code>public/diagrams/pipeline-flow.html</code> (iframe) + postMessage live status.</td></tr>
+  <tr><td class="mono">styles/</td><td>bg #070a12, panel rgba(18,14,8,.85), solar accent #ffb454 / plasma #ff7a45, magnetosphere teal #4fd4c4; tabular-nums; product blurb + Apache-2.0 in footer (FR-UI-5).</td></tr>
+</table>
+
+<h1>8. Test Plan</h1>
+<table>
+  <tr><th>Suite</th><th>Cases</th></tr>
+  <tr><td class="mono">test_f107_forecast</td><td>point reverts toward 27-day mean as lead grows; bands monotone p05≤…≤p95; floor at 64 sfu enforced; synthetic sinusoid-plus-trend recovered within tolerance.</td></tr>
+  <tr><td class="mono">test_kp_forecast</td><td>category probabilities sum to 1 per lead; elevated recent activity raises storm probability; Ap band ordered lo≤point≤hi.</td></tr>
+  <tr><td class="mono">test_calibration</td><td>walk-forward is leakage-free (shuffling the future cannot change past-origin errors); coverage of a Gaussian synthetic ≈ nominal; pinball loss zero at perfect quantile; skill sign correct.</td></tr>
+  <tr><td class="mono">test_drag</td><td>density monotincreasing in F10.7; higher F10.7 band widens decay band; altitude ordering (lower alt → denser).</td></tr>
+  <tr><td class="mono">test_api</td><td>TestClient: /health; /forecast/f107 contract + band monotonicity; /calibration shape; unknown route 404 envelope; lead&gt;45 → 422 envelope; pipeline status shape.</td></tr>
+</table>
+
+<footer>PENUMBRA · PEN-LLD-001 v1.0 · Traces: PEN-HLD-001, PEN-SRS-001.</footer>
+</body>
+</html>

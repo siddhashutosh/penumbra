@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PENUMBRA — Software Requirements Specification</title>
+<link rel="stylesheet" href="doc-style.css">
+</head>
+<body>
+
+<div class="cover">
+  <div class="project">PENUMBRA</div>
+  <div class="doctitle">Software Requirements Specification (SRS)</div>
+  <div class="meta">
+    <span><b>Document ID:</b> PEN-SRS-001</span>
+    <span><b>Version:</b> 1.0</span>
+    <span><b>Date:</b> 23 July 2026</span>
+    <span><b>Status:</b> Baselined</span>
+  </div>
+  <div class="meta"><span><b>Product:</b> PENUMBRA — Probabilistic Space-Weather Driver Forecasting</span></div>
+</div>
+
+<h1>1. Introduction</h1>
+<h2>1.1 Purpose</h2>
+<p>This SRS defines the functional and non-functional requirements for <b>PENUMBRA</b>, an
+open-source system that produces <b>probabilistic forecasts of the space-weather drivers</b> that
+govern satellite orbital drag — the F10.7 solar radio flux and the Kp geomagnetic index — attaches
+calibrated uncertainty to every prediction, verifies that calibration against ground truth, and
+translates the driver uncertainty into orbital-drag and orbit-decay risk. It is delivered as a REST
+API and a web dashboard.</p>
+
+<h2>1.2 Scope</h2>
+<p>Atmospheric drag is the largest source of orbit-prediction error in LEO, and the dominant
+sub-source is frequently the <i>forecast of the drivers</i> feeding the density model, not the
+density model itself (Parker et al., 2024). Operational driver forecasts — including NOAA's 45-day
+F10.7/Ap product — are published as <b>point values with no uncertainty quantification</b>, forcing
+operators to make unsupported assumptions during orbit and conjunction assessment. Research-grade
+probabilistic methods exist but there is <b>no operational product</b>. PENUMBRA fills that gap. It
+is the phase-2 companion to the KESSLER conjunction-assessment toolkit; together they form an open
+orbital-risk stack.</p>
+<p>Out of scope for v1.0: full physics-based thermosphere modelling (PENUMBRA uses a documented
+reduced density model for the impact translation), ionospheric/TEC forecasting, solar-flare
+prediction, and paid data sources.</p>
+
+<h2>1.3 Definitions and Acronyms</h2>
+<table>
+  <tr><th>Term</th><th>Definition</th></tr>
+  <tr><td class="mono">F10.7</td><td>Solar radio flux at 10.7 cm (2800 MHz), in solar flux units (sfu). Primary proxy for solar EUV heating of the thermosphere.</td></tr>
+  <tr><td class="mono">Kp</td><td>Planetary geomagnetic activity index, quasi-logarithmic scale 0–9 (in thirds), 3-hourly.</td></tr>
+  <tr><td class="mono">Ap</td><td>Daily linearised geomagnetic amplitude index derived from Kp.</td></tr>
+  <tr><td class="mono">Driver</td><td>An input index (F10.7, Kp/Ap) that drives an atmospheric-density model.</td></tr>
+  <tr><td class="mono">Lead time</td><td>Forecast horizon: days ahead of issue date (1…45).</td></tr>
+  <tr><td class="mono">Quantile band</td><td>Interval between two forecast quantiles (e.g. p05–p95 = 90% band).</td></tr>
+  <tr><td class="mono">Calibration</td><td>Property that a stated X% band contains the truth X% of the time over many forecasts.</td></tr>
+  <tr><td class="mono">Coverage</td><td>Empirical fraction of observations falling inside a stated band.</td></tr>
+  <tr><td class="mono">Pinball loss</td><td>Proper scoring rule for a quantile forecast (a.k.a. quantile loss).</td></tr>
+  <tr><td class="mono">Skill score</td><td>Relative improvement of a forecast over a reference (here, NOAA's 45-day forecast).</td></tr>
+  <tr><td class="mono">SWPC</td><td>NOAA Space Weather Prediction Center.</td></tr>
+</table>
+
+<h2>1.4 References</h2>
+<ul>
+  <li>Parker &amp; Linares (2024) — Influences of Space Weather Forecasting Uncertainty on Satellite Conjunction Assessment, <i>Space Weather</i> (AGU), DOI 10.1029/2023SW003818.</li>
+  <li>NOAA SWPC data services — <code>services.swpc.noaa.gov/json/</code> (F10.7, Kp, 45-day forecast).</li>
+  <li>GFZ Potsdam — Kp index archive, <code>kp.gfz-potsdam.de</code>.</li>
+  <li>Vallado, <i>Fundamentals of Astrodynamics and Applications</i> — exponential atmosphere and drag.</li>
+</ul>
+
+<h1>2. Overall Description</h1>
+<h2>2.1 Product Perspective</h2>
+<p>PENUMBRA is a self-contained web application plus a reusable forecasting core. It consumes only
+free public NOAA/GFZ data and requires no paid dependency. It runs fully on a small VPS; the service
+layer isolates storage and scheduling behind interfaces so the system can later move to cloud
+infrastructure without touching the forecasting logic.</p>
+
+<h2>2.2 User Classes</h2>
+<table>
+  <tr><th>User class</th><th>Description</th><th>Primary interest</th></tr>
+  <tr><td>Satellite operator</td><td>Plans manoeuvres and orbit maintenance.</td><td>"How uncertain is my predicted orbit over the next N days, and why?"</td></tr>
+  <tr><td>Orbit-prediction / SSA software</td><td>Consumes driver forecasts programmatically.</td><td>A driver <i>distribution</i>, not a point, to propagate state uncertainty honestly.</td></tr>
+  <tr><td>Space-weather researcher</td><td>Studies driver forecasting and calibration.</td><td>Reproducible probabilistic forecasts, verification metrics, skill vs NOAA.</td></tr>
+  <tr><td>Demo viewer</td><td>Evaluates the project.</td><td>Clear fan charts, the calibration story, polish.</td></tr>
+</table>
+
+<h2>2.3 Operating Environment</h2>
+<ul>
+  <li>Backend: Python ≥ 3.11 (3.9 supported via typing back-port), FastAPI/uvicorn.</li>
+  <li>Frontend: Node ≥ 18, Vite build, evergreen browsers.</li>
+  <li>v1.0 target: localhost and a shared Lightsail VPS (co-hosted with KESSLER, isolated service/port).</li>
+</ul>
+
+<h2>2.4 Design Constraints</h2>
+<table>
+  <tr><td class="req-id">CON-1</td><td>Forecasts MUST carry calibrated uncertainty; a point value without a band is not an acceptable output. Uncertainty is the product.</td></tr>
+  <tr><td class="req-id">CON-2</td><td>Uncertainty bands MUST be derived from a leakage-free walk-forward backtest (out-of-sample error quantiles), never fit in-sample.</td></tr>
+  <tr><td class="req-id">CON-3</td><td>The system MUST be fully functional with zero credentials (Demo Mode) using bundled historical data.</td></tr>
+  <tr><td class="req-id">CON-4</td><td>NOAA/GFZ are public but not to be hammered: cache-first architecture, polite intervals; no per-user live fetches.</td></tr>
+  <tr><td class="req-id">CON-5</td><td>Repository layout mirrors KESSLER: separate <code>ui/</code> and <code>backend/</code>; backend separates <code>logic/</code> (pure math) and <code>service/</code> (I/O). Deploy MUST NOT disturb the co-hosted KESSLER service.</td></tr>
+</table>
+
+<h1>3. Functional Requirements</h1>
+
+<h2>3.1 Data Ingestion (FR-ING)</h2>
+<table>
+  <tr><th>ID</th><th>Requirement</th><th>Priority</th></tr>
+  <tr><td class="req-id">FR-ING-1</td><td>SHALL ingest daily observed F10.7 from NOAA SWPC (<code>f107_cm_flux.json</code>) and long-history monthly indices (<code>solar-cycle/observed-solar-cycle-indices.json</code>), keyless.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-ING-2</td><td>SHALL ingest planetary Kp from NOAA SWPC (<code>products/noaa-planetary-k-index.json</code>) and derive daily max-Kp / Ap.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-ING-3</td><td>SHALL ingest NOAA's official 45-day F10.7/Ap forecast (<code>45-day-forecast.json</code>) as the reference baseline for skill scoring.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-ING-4</td><td>All external fetches SHALL be cached with per-source TTL (observations ≥ 3 h, forecast ≥ 6 h) and served from cache within TTL.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-ING-5</td><td>In Demo Mode the system SHALL load bundled historical series and mark responses <code>data_mode: "demo"</code>.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-ING-6</td><td>Ingestion failures SHALL degrade to last-known-good cache with a structured warning, never a hard failure.</td><td>Must</td></tr>
+</table>
+
+<h2>3.2 F10.7 Probabilistic Forecast (FR-F107)</h2>
+<table>
+  <tr><th>ID</th><th>Requirement</th><th>Priority</th></tr>
+  <tr><td class="req-id">FR-F107-1</td><td>SHALL produce a point forecast of daily F10.7 for lead times 1–45 days using a persistence-with-mean-reversion model toward the local solar-rotation (27-day) and cycle climatology.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-F107-2</td><td>SHALL attach quantile bands (at least p05, p25, p50, p75, p95) per lead day, derived from the empirical distribution of out-of-sample forecast errors at that lead time (FR-VER-1).</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-F107-3</td><td>Bands SHALL be monotonic (p05 ≤ p25 ≤ … ≤ p95) and F10.7 SHALL be floored at the physical quiet-Sun minimum (~64 sfu).</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-F107-4</td><td>All forecast math SHALL be pure functions in the logic layer (no I/O) and unit-tested, including monotonicity and a synthetic-signal recovery test.</td><td>Must</td></tr>
+</table>
+
+<h2>3.3 Kp / Geomagnetic Forecast (FR-KP)</h2>
+<table>
+  <tr><th>ID</th><th>Requirement</th><th>Priority</th></tr>
+  <tr><td class="req-id">FR-KP-1</td><td>SHALL produce, per lead day 1–7, probabilities across geomagnetic categories: <b>Quiet</b> (Kp&lt;3), <b>Unsettled</b> (3≤Kp&lt;4), <b>Active</b> (4≤Kp&lt;5), <b>Storm</b> (Kp≥5).</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-KP-2</td><td>Category probabilities SHALL be estimated from the recency-weighted historical transition frequencies conditioned on recent activity, and SHALL sum to 1 per lead day.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-KP-3</td><td>SHALL expose the expected daily Ap with an uncertainty band for downstream drag modelling.</td><td>Should</td></tr>
+</table>
+
+<h2>3.4 Verification &amp; Calibration (FR-VER)</h2>
+<table>
+  <tr><th>ID</th><th>Requirement</th><th>Priority</th></tr>
+  <tr><td class="req-id">FR-VER-1</td><td>SHALL run a walk-forward backtest over the historical record: at each origin, forecast forward, then record the signed error per lead time — with a strict train/verify time split (no future leakage).</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-VER-2</td><td>SHALL compute band <b>coverage</b> (empirical fraction inside p05–p95 and p25–p75) per lead time; a calibrated 90% band targets 0.90 coverage.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-VER-3</td><td>SHALL compute a <b>reliability diagram</b> (predicted vs observed frequency) for the Kp categorical forecast.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-VER-4</td><td>SHALL compute <b>pinball loss</b> for the F10.7 quantiles and a <b>skill score</b> of the PENUMBRA point forecast against NOAA's 45-day forecast (RMSE-based, per lead time).</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-VER-5</td><td>The calibration report SHALL be exposed via API and rendered in the UI — it is the product's primary credibility artifact.</td><td>Must</td></tr>
+</table>
+
+<h2>3.5 Drag-Impact Translation (FR-DRAG)</h2>
+<table>
+  <tr><th>ID</th><th>Requirement</th><th>Priority</th></tr>
+  <tr><td class="req-id">FR-DRAG-1</td><td>SHALL map the F10.7 forecast band to a thermospheric density band at reference altitudes (e.g. 400, 550, 800 km) via a documented reduced density model (F10.7-scaled exponential atmosphere).</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-DRAG-2</td><td>SHALL express the resulting along-track position / orbit-decay uncertainty growth for a nominal LEO object over the forecast window — the explicit bridge to conjunction assessment.</td><td>Should</td></tr>
+  <tr><td class="req-id">FR-DRAG-3</td><td>SHALL clearly label the drag translation as reduced-model, order-of-magnitude guidance — not a high-fidelity propagation.</td><td>Must</td></tr>
+</table>
+
+<h2>3.6 API (FR-API)</h2>
+<table>
+  <tr><th>ID</th><th>Requirement</th><th>Priority</th></tr>
+  <tr><td class="req-id">FR-API-1</td><td>REST API under <code>/api/v1</code>: F10.7 forecast, Kp forecast, drag impact, calibration report, recent observations, pipeline status, health.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-API-2</td><td>All errors SHALL use one envelope <code>{"error":{code,message,detail,request_id}}</code> with correct HTTP status.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-API-3</td><td>OpenAPI schema SHALL be served at <code>/docs</code>.</td><td>Must</td></tr>
+</table>
+
+<h2>3.7 Visualisation (FR-UI)</h2>
+<table>
+  <tr><th>ID</th><th>Requirement</th><th>Priority</th></tr>
+  <tr><td class="req-id">FR-UI-1</td><td>The dashboard SHALL render an F10.7 <b>fan chart</b>: observed history, point forecast, and nested p25–p75 / p05–p95 bands over 45 days, with NOAA's forecast overlaid for comparison.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-UI-2</td><td>SHALL render the Kp storm-probability forecast as a stacked per-day category strip, and the drag-impact panel.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-UI-3</td><td>A <b>Calibration</b> page SHALL render coverage-by-lead, the reliability diagram, and the skill-vs-NOAA curve.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-UI-4</td><td>A <b>Pipeline</b> page SHALL embed the n8n-style agent/data-flow diagram with live stage status.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-UI-5</td><td>Visual design: dark space-grade theme with a solar accent; every chart labelled with units, lead time, and issue date; product description and Apache-2.0 licensing shown in the UI.</td><td>Must</td></tr>
+  <tr><td class="req-id">FR-UI-6</td><td>API failures SHALL surface as non-blocking toasts with retry; charts keep last-good data.</td><td>Must</td></tr>
+</table>
+
+<h1>4. Non-Functional Requirements</h1>
+<table>
+  <tr><th>ID</th><th>Category</th><th>Requirement</th></tr>
+  <tr><td class="req-id">NFR-1</td><td>Reliability</td><td>Every service entry point wraps external I/O in typed exception handling; no unhandled exception crosses the API boundary (global handler guarantees the error envelope).</td></tr>
+  <tr><td class="req-id">NFR-2</td><td>Observability</td><td>Structured logging with request_id to console and rotating file; each pipeline agent run logged with duration and item counts.</td></tr>
+  <tr><td class="req-id">NFR-3</td><td>Performance</td><td>Cached forecast endpoints p95 &lt; 200 ms; a full walk-forward backtest over the bundled record completes in &lt; 10 s.</td></tr>
+  <tr><td class="req-id">NFR-4</td><td>Security</td><td>No credentials required; any optional keys via environment only; CORS limited to known origins.</td></tr>
+  <tr><td class="req-id">NFR-5</td><td>Portability / Coexistence</td><td>Runs as an isolated systemd service on its own port; MUST NOT modify or contend with the co-hosted KESSLER service; MemoryMax bounded for the shared 414 MB host.</td></tr>
+  <tr><td class="req-id">NFR-6</td><td>Maintainability</td><td>Logic layer framework-free pure Python; ≥ 85% unit coverage on <code>logic/</code>; UI strict TypeScript.</td></tr>
+  <tr><td class="req-id">NFR-7</td><td>Compliance</td><td>NOAA/GFZ attribution rendered in UI and API root; NOAA data noted as public domain.</td></tr>
+</table>
+
+<h1>5. Acceptance Criteria</h1>
+<ul>
+  <li>All Must requirements implemented; QA report (PEN-QA-001) shows tests passing.</li>
+  <li>Backend + UI run on localhost in Demo Mode with a working F10.7 fan chart, Kp strip, and calibration page — no console errors.</li>
+  <li>Unit tests green: forecast monotonicity + synthetic recovery, backtest leakage-free, coverage/pinball/skill math, drag translation, API contract.</li>
+  <li>Documents delivered: SRS, HLD, LLD, QA (PDF) + interactive pipeline diagram (HTML) + video demo.</li>
+  <li>Deployed to the shared VPS on an isolated port with KESSLER unaffected.</li>
+</ul>
+
+<footer>PENUMBRA · PEN-SRS-001 v1.0 · Space-weather data courtesy of NOAA SWPC (public domain) and GFZ Potsdam. Phase-2 companion to KESSLER.</footer>
+</body>
+</html>

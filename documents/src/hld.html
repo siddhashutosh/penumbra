@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PENUMBRA — High-Level Design</title>
+<link rel="stylesheet" href="doc-style.css">
+</head>
+<body>
+
+<div class="cover">
+  <div class="project">PENUMBRA</div>
+  <div class="doctitle">High-Level Design (HLD)</div>
+  <div class="meta">
+    <span><b>Document ID:</b> PEN-HLD-001</span>
+    <span><b>Version:</b> 1.0</span>
+    <span><b>Date:</b> 23 July 2026</span>
+    <span><b>Traces to:</b> PEN-SRS-001</span>
+  </div>
+</div>
+
+<h1>1. System Overview</h1>
+<p>PENUMBRA is a two-tier web system — a Python forecasting/orchestration backend and a React
+charting frontend — arranged around a <b>cache-first data pipeline</b>. Public NOAA/GFZ feeds are
+polled on schedule, normalised into aligned time series, run through a leakage-free walk-forward
+backtest to learn per-lead-time error distributions, and then combined with a point model to emit
+<b>probabilistic forecasts with verified calibration</b>. The pipeline is modelled as six named
+<b>agents</b>; the same graph is rendered as the n8n-style diagram embedded in the UI.</p>
+
+<h1>2. Architecture</h1>
+<div class="diagram">
+┌──────────────────────  EXTERNAL (free, public, keyless)  ─────────────────────┐
+│  NOAA SWPC json/  ──  f107_cm_flux · planetary_k_index · 45-day-forecast       │
+│  NOAA solar-cycle indices (long history)   ·   GFZ Potsdam Kp archive          │
+└───────────────┬────────────────────────────────────────────────────────────────┘
+                │  (cache-first, polite intervals, last-known-good fallback)
+┌───────────────▼────────────────────────────────────────────────────────────────┐
+│  BACKEND  (Python 3.11 · FastAPI · uvicorn)                        backend/     │
+│                                                                                 │
+│   SERVICE LAYER  app/service/           ── orchestration, I/O, caching          │
+│   ┌────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────────────┐  │
+│   │ swpc_client│ │ cache_service │ │ pipeline_svc  │ │ forecast_service      │  │
+│   │ (NOAA)     │ │ (SQLite+TTL)  │ │ (agent state) │ │ (pipeline orchestrator)│ │
+│   └────────────┘ └───────────────┘ └───────────────┘ └───────────────────────┘  │
+│                         ┌────────────────────┐                                   │
+│                         │ briefing_service   │  optional Claude analyst note     │
+│                         │ (graceful fallback)│  disabled w/o ANTHROPIC key       │
+│                         └────────────────────┘                                   │
+│                                                                                 │
+│   LOGIC LAYER  app/logic/               ── pure functions, no I/O               │
+│   ┌───────────┐ ┌──────────────┐ ┌──────────────┐ ┌────────────┐ ┌───────────┐ │
+│   │ series    │ │ f107_forecast│ │ kp_forecast  │ │ calibration│ │ drag      │ │
+│   │ (align/   │ │ (persist +   │ │ (categorical │ │ (coverage/ │ │ (density/ │ │
+│   │  gapfill) │ │  reversion + │ │  storm prob) │ │  pinball/  │ │  decay    │ │
+│   │           │ │  quantiles)  │ │              │ │  skill)    │ │  bands)   │ │
+│   └───────────┘ └──────────────┘ └──────────────┘ └────────────┘ └───────────┘ │
+│                                                                                 │
+│   API  app/api/routes.py      ·      CORE  app/core/ (config·logging·exceptions)│
+└───────────────────────────────────────┬──────────────────────────────────────────┘
+                                        │  REST /api/v1  (JSON, error envelope)
+┌───────────────────────────────────────▼──────────────────────────────────────────┐
+│  UI  (React 18 · TypeScript · Vite · Canvas charts)                    ui/       │
+│  Forecast (F10.7 fan + Kp strip + drag) · Calibration · Pipeline (n8n, live)     │
+└───────────────────────────────────────────────────────────────────────────────────┘
+</div>
+
+<h2>2.1 Component Responsibilities</h2>
+<table>
+  <tr><th>Component</th><th>Layer</th><th>Responsibility</th><th>SRS trace</th></tr>
+  <tr><td class="mono">swpc_client</td><td>service</td><td>Fetch F10.7, Kp, 45-day forecast, long history from NOAA (keyless); retry + backoff; typed <code>DataSourceError</code>.</td><td>FR-ING-1..3</td></tr>
+  <tr><td class="mono">cache_service</td><td>service</td><td>SQLite key/TTL cache + forecast read-model + pipeline runs; last-known-good fallback; AWS swap seam.</td><td>FR-ING-4/6</td></tr>
+  <tr><td class="mono">forecast_service</td><td>service</td><td>Pipeline orchestrator: load → align → backtest → forecast → calibrate → publish. Read model for API.</td><td>all FR-*</td></tr>
+  <tr><td class="mono">pipeline_service</td><td>service</td><td>Per-agent stage status/timings powering the live diagram.</td><td>FR-UI-4</td></tr>
+  <tr><td class="mono">briefing_service</td><td>service</td><td>Optional Claude space-weather briefing; deterministic template fallback.</td><td>—</td></tr>
+  <tr><td class="mono">series</td><td>logic</td><td>Load/align/resample/gap-fill the F10.7 and Kp series; daily aggregation of Kp→Ap.</td><td>FR-ING-2</td></tr>
+  <tr><td class="mono">f107_forecast</td><td>logic</td><td>Point forecast (persistence + reversion to 27-day + climatology) and quantile bands from backtest errors.</td><td>FR-F107-*</td></tr>
+  <tr><td class="mono">kp_forecast</td><td>logic</td><td>Recency-weighted categorical storm probabilities; expected Ap band.</td><td>FR-KP-*</td></tr>
+  <tr><td class="mono">calibration</td><td>logic</td><td>Walk-forward backtest, coverage, reliability, pinball loss, skill vs NOAA.</td><td>FR-VER-*</td></tr>
+  <tr><td class="mono">drag</td><td>logic</td><td>F10.7 band → density band (reduced model) → along-track/decay uncertainty.</td><td>FR-DRAG-*</td></tr>
+</table>
+
+<h2>2.2 The Agent Pipeline</h2>
+<table>
+  <tr><th>#</th><th>Agent</th><th>Trigger</th><th>Function</th></tr>
+  <tr><td>1</td><td><b>SWPC Sync</b></td><td>Startup + 3 h</td><td>Pull F10.7, Kp, NOAA 45-day forecast, long history → cache.</td></tr>
+  <tr><td>2</td><td><b>History Builder</b></td><td>On new data</td><td>Align to a daily grid, aggregate Kp→daily max/Ap, gap-fill.</td></tr>
+  <tr><td>3</td><td><b>Backtest Engine</b></td><td>On history</td><td>Walk-forward, leakage-free; per-lead-time error distribution + Kp transition stats.</td></tr>
+  <tr><td>4</td><td><b>Forecast Engine</b></td><td>Per issue</td><td>Point F10.7 + quantile bands; Kp category probabilities; expected Ap.</td></tr>
+  <tr><td>5</td><td><b>Calibration Auditor</b></td><td>On backtest</td><td>Coverage, reliability, pinball, skill vs NOAA; flags mis-calibration.</td></tr>
+  <tr><td>6</td><td><b>Publisher</b></td><td>On snapshot</td><td>Persist read-model (forecast + drag + calibration), expose via REST, notify UI.</td></tr>
+</table>
+
+<h1>3. Forecasting Approach (rationale)</h1>
+<p>PENUMBRA deliberately uses a <b>transparent, defensible statistical model</b> rather than an
+opaque black box, because the deliverable is <i>calibrated uncertainty</i>, which must be verifiable:</p>
+<ul>
+  <li><b>F10.7 point</b>: F10.7 is strongly autocorrelated day-to-day and modulated by the 27-day
+      solar-rotation period. The point forecast blends short-lag persistence with mean-reversion
+      toward the trailing 27-day mean and the longer cycle level, the reversion strength increasing
+      with lead time. This matches the physical behaviour and is a strong, honest baseline.</li>
+  <li><b>Uncertainty</b>: the band at lead L is the point forecast plus the empirical p05…p95 of the
+      <i>out-of-sample</i> forecast errors at lead L, measured by walk-forward backtest. Because the
+      band is learned from real forecast errors, it is calibrated by construction if the backtest is
+      leakage-free — which is the single most important correctness property (CON-2, FR-VER-1).</li>
+  <li><b>Kp</b>: a bounded quasi-discrete index; a point value is misleading. PENUMBRA emits
+      category probabilities from recency-weighted historical transition frequencies conditioned on
+      the current activity level — an operationally meaningful "chance of a storm" per day.</li>
+  <li><b>Skill</b>: every claim is checked against NOAA's own 45-day forecast, so "better than the
+      official product" is a measured, reproducible statement, not a marketing one.</li>
+</ul>
+<div class="note"><b>Honest scope.</b> This is a statistically calibrated reduced-model forecaster,
+not a physics ensemble. The value is that it publishes <i>verified</i> uncertainty where the
+operational products publish none — exactly the gap identified by Parker et al. (2024).</div>
+
+<h1>4. Data Design (summary)</h1>
+<p>SQLite (<code>backend/app/data/cache.db</code>): <code>kv_cache</code> (source payloads + TTL),
+<code>forecast_snapshots</code> (issued forecast + calibration read-model as JSON documents), and
+<code>pipeline_runs</code> (agent, timing, status, items, error). The <code>CacheService</code>
+interface is the single seam for a later move to managed storage.</p>
+
+<h1>5. Error Handling &amp; Logging</h1>
+<ul>
+  <li>Exception hierarchy rooted at <code>PenumbraError(code, message, http_status)</code>:
+      <code>DataSourceError</code> (502), <code>InsufficientDataError</code> (422),
+      <code>ForecastError</code> (500), <code>NotFoundError</code> (404), <code>ConfigError</code> (500),
+      <code>ValidationFailure</code> (422).</li>
+  <li>Boundary rule: logic raises; service contextualises &amp; decides fallback (cache, demo, skip);
+      API converts to the JSON error envelope. The UI never sees a stack trace.</li>
+  <li>Structured logging (request_id middleware); agent runs logged start/finish with duration and
+      item counts. WARN = degraded (fallback used), ERROR = user-visible failure.</li>
+</ul>
+
+<h1>6. Technology Choices</h1>
+<table>
+  <tr><th>Choice</th><th>Rationale</th></tr>
+  <tr><td>FastAPI + Pydantic v2</td><td>Typed contracts, free OpenAPI, async polite fetching.</td></tr>
+  <tr><td>NumPy only (no ML framework)</td><td>The method is quantile statistics + a linear point model; heavyweight ML deps add risk and memory without adding calibration.</td></tr>
+  <tr><td>SQLite</td><td>Zero-ops local persistence; interface-isolated for later cloud storage.</td></tr>
+  <tr><td>React + Canvas charts (no chart lib)</td><td>Fan charts with nested bands are hand-drawn on Canvas for full control and a tiny bundle; consistent with the dataviz principles.</td></tr>
+  <tr><td>Vite</td><td>Fast dev server, <code>/api</code> proxy to backend.</td></tr>
+</table>
+
+<h1>7. Deployment View</h1>
+<p><b>v1.0:</b> localhost (uvicorn :8001 + Vite :5175 proxy) and the shared Lightsail VPS
+(13.127.244.0). On the VPS, PENUMBRA runs as its own systemd service on <b>port 8001</b>, exposed
+through an isolated nginx server block on a dedicated public port, with <b>KESSLER's port-80
+default server left entirely untouched</b> (NFR-5). A bounded <code>MemoryMax</code> and the host's
+existing swap keep the two services co-resident on 414 MB. <b>v2.0:</b> managed storage/scheduler
+behind the <code>CacheService</code> seam; no logic-layer change anticipated.</p>
+
+<h1>8. Risks &amp; Mitigations</h1>
+<table>
+  <tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr>
+  <tr><td>In-sample band fitting (leakage)</td><td>Over-confident, mis-calibrated bands</td><td>Strict walk-forward split; a leakage-detection unit test.</td></tr>
+  <tr><td>Shared-host memory pressure</td><td>OOM affecting KESSLER</td><td>MemoryMax cap; in-process caches; swap; monitored on deploy.</td></tr>
+  <tr><td>Reduced drag model over-read</td><td>Users treat it as operational CA</td><td>Explicit "reduced-model, order-of-magnitude" labelling in UI + API.</td></tr>
+  <tr><td>Sparse Kp transition history for rare storms</td><td>Noisy storm probabilities</td><td>Recency-weighting + smoothing; wide honest bands; documented limitation.</td></tr>
+</table>
+
+<footer>PENUMBRA · PEN-HLD-001 v1.0 · Traces: PEN-SRS-001. Space-weather data courtesy of NOAA SWPC and GFZ Potsdam.</footer>
+</body>
+</html>
