@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Env & secrets
+.env
+.env.local
+*.pem
+.pypi-token/
+
+# Runtime artifacts
+backend/logs/*.log
+backend/app/data/cache.db
+backend/app/data/cache.db-*
+
+# Python build artifacts
+packages/*/dist/
+packages/*/build/
+*.egg-info/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
